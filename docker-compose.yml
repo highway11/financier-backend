@@ -1,0 +1,74 @@
+# Instuctions to use docker stack deploy: https://docs.docker.com/engine/swarm/stack-deploy/
+
+version: '3.1'
+services:
+  # nginx serves the static files from Financier Mobile and reverse proxies
+  # all the other containers.
+  nginx:
+    image: registry.gitlab.com/josh-whitney/financier-backend/nginx
+    build:
+      context: ./docker/nginx
+      dockerfile: ./Dockerfile
+    ports:
+      - "80:80"
+      - "443:443"
+      - "9443:9443"
+    secrets:
+      - ssl_certificate
+      - ssl_certificate_key
+  # CouchDB persists all the budget data in the directory ./couchdb_data
+  couchdb:
+    image: registry.gitlab.com/josh-whitney/financier-backend/couchdb
+    build:
+      context: ./docker/couchdb
+      dockerfile: ./Dockerfile
+    volumes:
+      - ./couchdb_data:/opt/couchdb/data
+  # We need to manually initialize the couchdb system databases because it's not
+  # done by the container automatically.  The only way I could get this to work
+  # was using an init container that waits for the DB to be available and then
+  # creates what is needed.
+  # This is a common way to do things in Kubernetes for example, see
+  # https://blog.idempotent.ca/2017/06/04/kubernetes-learning-notes---part-4---service-bootstrapping-with-init-containers/
+  init:
+    image: registry.gitlab.com/josh-whitney/financier-backend/init
+    build:
+      context: ./docker/init
+      dockerfile: ./Dockerfile
+    depends_on:
+      - "couchdb"
+    command: sh -c '/wait-for couchdb:5984 -- /couchdb_init.sh'
+    secrets:
+      - admin_password
+  # The Financier web app.
+  node:
+    image: registry.gitlab.com/financier/financier:latest
+  # db_api handles new user creation.
+  db_api:
+    image: registry.gitlab.com/josh-whitney/financier-backend/db_api
+    build:
+      context: ./docker/db_api
+      dockerfile: ./Dockerfile
+    secrets:
+      - admin_password
+  # Generate ssl certs doesn't do much of anything normally and is only
+  # here to make it easier for users to create some self-signed
+  # certs.
+  generate_ssl_certs:
+    image: registry.gitlab.com/josh-whitney/financier-backend/generate_ssl_certs
+    volumes:
+      - ./secrets:/secrets
+    build:
+      context: ./docker/generate_ssl_certs
+      dockerfile: ./Dockerfile
+    command: echo -e "generate_ssl_certs disabled. Run manually only if you need SSL certs generated using\ndocker-compose run generate_ssl_certs sh ./create_certs.sh"
+
+
+secrets:
+  admin_password:
+    file: ./secrets/admin_password.txt
+    # external: true
+  ssl_certificate:
+    file: ./secrets/site.crt
+  ssl_certificate_key:
+    file: ./secrets/site.key
