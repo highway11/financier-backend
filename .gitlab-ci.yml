@@ -1,0 +1,65 @@
+image: docker:git
+
+stages:
+  - install_fmobile
+  - build_fmobile
+  - deploy
+
+install_fmobile:
+  stage: install_fmobile
+  image: node:8-alpine
+  script:
+    - apk add --update alpine-sdk python
+    - cd docker/financier_mobile
+    - git clone https://gitlab.com/asromzek/fmobile.git
+    - cd fmobile
+    - npm install
+  cache:
+    key: ${CI_JOB_ID}
+    paths:
+      - docker/financier_mobile/fmobile
+  artifacts:
+    paths:
+     - docker/financier_mobile/fmobile
+
+build_fmobile:
+  stage: build_fmobile
+  image: node:8-alpine
+  script:
+    - cd docker/financier_mobile/fmobile/
+    - pwd
+    - ls
+    - npm run build
+    - mv dist ../../nginx
+  artifacts:
+    paths:
+     - docker/nginx/dist/
+
+deploy:
+  stage: deploy
+  image: docker:git
+  services:
+    - docker:dind
+  before_script:
+    - apk add --no-cache py-pip build-base python2-dev python3-dev libffi-dev openssl-dev
+    - pip install docker-compose
+  script:
+    - COMMIT=${CI_BUILD_REF::8}
+
+    - docker login -u gitlab-ci-token -p $CI_BUILD_TOKEN $CI_REGISTRY
+
+    - export TAG=`if [ "$CI_BUILD_REF_NAME" == "master" ]; then echo "latest"; else echo $CI_BUILD_REF_NAME ; fi`
+
+    - docker-compose build
+
+    - docker tag $CI_REGISTRY_IMAGE/nginx $CI_REGISTRY_IMAGE/nginx:$TAG
+    - docker push $CI_REGISTRY_IMAGE/nginx:$TAG
+    - docker tag $CI_REGISTRY_IMAGE/init $CI_REGISTRY_IMAGE/init:$TAG
+    - docker push $CI_REGISTRY_IMAGE/init:$TAG
+    - docker tag $CI_REGISTRY_IMAGE/couchdb $CI_REGISTRY_IMAGE/couchdb:$TAG
+    - docker push $CI_REGISTRY_IMAGE/couchdb:$TAG
+    - docker tag $CI_REGISTRY_IMAGE/generate_ssl_certs $CI_REGISTRY_IMAGE/generate_ssl_certs:$TAG
+    - docker push $CI_REGISTRY_IMAGE/generate_ssl_certs:$TAG
+    - docker tag $CI_REGISTRY_IMAGE/db_api $CI_REGISTRY_IMAGE/db_api:$TAG
+    - docker push $CI_REGISTRY_IMAGE/db_api:$TAG
+  when: on_success
