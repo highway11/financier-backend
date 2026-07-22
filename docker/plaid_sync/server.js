@@ -215,24 +215,17 @@ async function findTransactionByPlaidId(userDb, budgetId, plaidTransactionId) {
  * Find an existing transaction in the same account with matching value
  * and date within ±3 days that does NOT yet have a plaid_transaction_id.
  */
-async function findProximityMatchingTransaction(userDb, budgetId, financierAccountId, value, dateStr) {
-  const prefix = `b_${budgetId}_transaction_`;
-  const result = await userDb.list({
-    include_docs: true,
-    startkey: prefix,
-    endkey: prefix + "\uffff",
-  });
-
+function findProximityMatchingTransaction(allDocsRows, financierAccountId, value, dateStr, matchedDocIds) {
   const txnDate = moment(dateStr, "YYYY-MM-DD");
 
-  for (const row of result.rows) {
+  for (const row of allDocsRows) {
     const doc = row.doc;
     if (!doc || doc._deleted) continue;
 
     // Must belong to the target account and have exact same value
     if (doc.account === financierAccountId && doc.value === value) {
-      // Must not already be linked to another Plaid transaction
-      if (!doc.plaid_transaction_id) {
+      // Must not already be matched or linked to another Plaid transaction
+      if (!doc.plaid_transaction_id && !matchedDocIds.has(doc._id)) {
         const docDate = moment(doc.date, "YYYY-MM-DD");
         const diffDays = Math.abs(txnDate.diff(docDate, "days"));
         if (diffDays <= 3) {
@@ -243,6 +236,28 @@ async function findProximityMatchingTransaction(userDb, budgetId, financierAccou
   }
 
   return null;
+}
+
+/**
+ * Safely update an existing transaction doc with Plaid ID and cleared flag.
+ * Always fetches the freshest _rev before writing to prevent 409 conflicts.
+ */
+async function updateExistingTransaction(userDb, docId, plaidTransactionId, rawName) {
+  try {
+    const doc = await userDb.get(docId);
+    if (!doc._deleted) {
+      doc.plaid_transaction_id = plaidTransactionId;
+      doc.cleared = true;
+      if (!doc.memo && rawName) {
+        doc.memo = rawName;
+      }
+      await userDb.insert(doc);
+      return true;
+    }
+  } catch (err) {
+    console.warn(`Failed to update existing doc ${docId}:`, err.message);
+  }
+  return false;
 }
 
 /**
@@ -264,6 +279,25 @@ async function syncItemTransactions(itemDoc) {
       accountMap[acc.account_id] = acc.financier_account_id;
     }
   }
+
+  // Load all current transactions once for fast in-memory dedup & proximity matching
+  const prefix = `b_${budgetId}_transaction_`;
+  const allTxnsResult = await userDb.list({
+    include_docs: true,
+    startkey: prefix,
+    endkey: prefix + "\uffff",
+  });
+  const allTxnRows = allTxnsResult.rows || [];
+
+  // Track already-known Plaid transaction IDs
+  const knownPlaidIds = new Set();
+  allTxnRows.forEach((r) => {
+    if (r.doc && r.doc.plaid_transaction_id) {
+      knownPlaidIds.add(r.doc.plaid_transaction_id);
+    }
+  });
+
+  const matchedDocIds = new Set();
 
   let cursor = itemDoc.cursor || "";
   let hasMore = true;
@@ -289,29 +323,31 @@ async function syncItemTransactions(itemDoc) {
       if (!financierAccountId) continue; // Account not mapped
 
       // 1. Check for existing transaction with this exact plaid_transaction_id (dedup)
-      const existingById = await findTransactionByPlaidId(userDb, budgetId, txn.transaction_id);
-      if (existingById) continue;
+      if (knownPlaidIds.has(txn.transaction_id)) continue;
 
       // Plaid: positive = money leaving (debit), negative = money entering (credit)
       // Financier: negative = outflow, positive = inflow
       const value = Math.round(txn.amount * -100);
 
       // 2. Check for existing manual/CSV transaction with matching date (±3 days) and exact value
-      const existingByProximity = await findProximityMatchingTransaction(
-        userDb, budgetId, financierAccountId, value, txn.date
+      const existingByProximity = findProximityMatchingTransaction(
+        allTxnRows, financierAccountId, value, txn.date, matchedDocIds
       );
+
       if (existingByProximity) {
-        // Link Plaid ID to existing transaction and clear it
-        existingByProximity.plaid_transaction_id = txn.transaction_id;
-        existingByProximity.cleared = true;
-        if (!existingByProximity.memo && txn.name) {
-          existingByProximity.memo = txn.name;
+        matchedDocIds.add(existingByProximity._id);
+        knownPlaidIds.add(txn.transaction_id);
+
+        const updated = await updateExistingTransaction(
+          userDb, existingByProximity._id, txn.transaction_id, txn.name
+        );
+        if (updated) {
+          totalModified++;
+          continue;
         }
-        await userDb.insert(existingByProximity);
-        totalModified++;
-        continue;
       }
 
+      // 3. Insert new transaction doc if no match
       const rawName = getPlaidPayeeName(txn);
       const { payeeId, categorySuggest } = await resolvePayee(
         userDb, budgetId, rawName, existingPayees, importMappings
@@ -334,8 +370,13 @@ async function syncItemTransactions(itemDoc) {
         plaid_transaction_id: txn.transaction_id,
       };
 
-      await userDb.insert(transDoc);
-      totalAdded++;
+      try {
+        await userDb.insert(transDoc);
+        knownPlaidIds.add(txn.transaction_id);
+        totalAdded++;
+      } catch (err) {
+        console.warn(`Failed to insert transaction ${txn.transaction_id}:`, err.message);
+      }
     }
 
     // Process MODIFIED transactions
@@ -731,6 +772,62 @@ app.post("/unlink", authenticateUser, async (req, res) => {
   } catch (err) {
     console.error("unlink error:", err.message);
     res.status(500).json({ error: "Failed to unlink account" });
+  }
+});
+
+/**
+ * POST /deduplicate — Clean up duplicate transactions in a budget
+ * Body: { budgetId }
+ */
+app.post("/deduplicate", authenticateUser, async (req, res) => {
+  const { budgetId } = req.body;
+  if (!budgetId) {
+    return res.status(400).json({ error: "Missing budgetId" });
+  }
+
+  try {
+    const userDb = getUserDb(req.user.dbName);
+    const prefix = `b_${budgetId}_transaction_`;
+    const result = await userDb.list({
+      include_docs: true,
+      startkey: prefix,
+      endkey: prefix + "\uffff",
+    });
+
+    const txns = result.rows
+      .filter((r) => r.doc && !r.doc._deleted)
+      .map((r) => r.doc);
+
+    let removedCount = 0;
+    const seenMap = new Map();
+
+    for (const doc of txns) {
+      // Key by account + date + value
+      const key = `${doc.account}_${doc.date}_${doc.value}`;
+
+      if (seenMap.has(key)) {
+        const existing = seenMap.get(key);
+
+        // If one has plaid_transaction_id and the other doesn't, keep the one with plaid_transaction_id
+        if (!existing.plaid_transaction_id && doc.plaid_transaction_id) {
+          existing._deleted = true;
+          await userDb.insert(existing);
+          seenMap.set(key, doc);
+          removedCount++;
+        } else {
+          doc._deleted = true;
+          await userDb.insert(doc);
+          removedCount++;
+        }
+      } else {
+        seenMap.set(key, doc);
+      }
+    }
+
+    res.json({ success: true, removedCount });
+  } catch (err) {
+    console.error("deduplicate error:", err.message);
+    res.status(500).json({ error: "Deduplication failed" });
   }
 });
 
