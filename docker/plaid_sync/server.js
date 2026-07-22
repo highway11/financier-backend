@@ -71,7 +71,7 @@ async function authenticateUser(req, res, next) {
   }
 
   try {
-    const sessionRes = await fetch(`${COUCHDB_URL}/_session`, {
+    const sessionRes = await fetch("http://couchdb:5984/_session", {
       headers: { Cookie: cookie },
     });
     const session = await sessionRes.json();
