@@ -212,6 +212,40 @@ async function findTransactionByPlaidId(userDb, budgetId, plaidTransactionId) {
 }
 
 /**
+ * Find an existing transaction in the same account with matching value
+ * and date within ±3 days that does NOT yet have a plaid_transaction_id.
+ */
+async function findProximityMatchingTransaction(userDb, budgetId, financierAccountId, value, dateStr) {
+  const prefix = `b_${budgetId}_transaction_`;
+  const result = await userDb.list({
+    include_docs: true,
+    startkey: prefix,
+    endkey: prefix + "\uffff",
+  });
+
+  const txnDate = moment(dateStr, "YYYY-MM-DD");
+
+  for (const row of result.rows) {
+    const doc = row.doc;
+    if (!doc || doc._deleted) continue;
+
+    // Must belong to the target account and have exact same value
+    if (doc.account === financierAccountId && doc.value === value) {
+      // Must not already be linked to another Plaid transaction
+      if (!doc.plaid_transaction_id) {
+        const docDate = moment(doc.date, "YYYY-MM-DD");
+        const diffDays = Math.abs(txnDate.diff(docDate, "days"));
+        if (diffDays <= 3) {
+          return doc;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
  * Sync transactions for a single Plaid Item.
  */
 async function syncItemTransactions(itemDoc) {
@@ -254,18 +288,34 @@ async function syncItemTransactions(itemDoc) {
       const financierAccountId = accountMap[txn.account_id];
       if (!financierAccountId) continue; // Account not mapped
 
-      // Check for existing transaction with this plaid_transaction_id (dedup)
-      const existing = await findTransactionByPlaidId(userDb, budgetId, txn.transaction_id);
-      if (existing) continue;
+      // 1. Check for existing transaction with this exact plaid_transaction_id (dedup)
+      const existingById = await findTransactionByPlaidId(userDb, budgetId, txn.transaction_id);
+      if (existingById) continue;
+
+      // Plaid: positive = money leaving (debit), negative = money entering (credit)
+      // Financier: negative = outflow, positive = inflow
+      const value = Math.round(txn.amount * -100);
+
+      // 2. Check for existing manual/CSV transaction with matching date (±3 days) and exact value
+      const existingByProximity = await findProximityMatchingTransaction(
+        userDb, budgetId, financierAccountId, value, txn.date
+      );
+      if (existingByProximity) {
+        // Link Plaid ID to existing transaction and clear it
+        existingByProximity.plaid_transaction_id = txn.transaction_id;
+        existingByProximity.cleared = true;
+        if (!existingByProximity.memo && txn.name) {
+          existingByProximity.memo = txn.name;
+        }
+        await userDb.insert(existingByProximity);
+        totalModified++;
+        continue;
+      }
 
       const rawName = getPlaidPayeeName(txn);
       const { payeeId, categorySuggest } = await resolvePayee(
         userDb, budgetId, rawName, existingPayees, importMappings
       );
-
-      // Plaid: positive = money leaving (debit), negative = money entering (credit)
-      // Financier: negative = outflow, positive = inflow
-      const value = Math.round(txn.amount * -100);
 
       const transDoc = {
         _id: `b_${budgetId}_transaction_${uuidv4()}`,
