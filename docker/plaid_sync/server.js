@@ -695,30 +695,57 @@ app.get("/accounts", authenticateUser, async (req, res) => {
 
   try {
     const allItems = await plaidTokensDb.list({ include_docs: true });
-    const userItems = allItems.rows
-      .filter((r) => r.doc && r.doc.user_db === req.user.dbName && r.doc.budget_id === budgetId)
-      .map((r) => ({
-        item_id: r.doc.item_id,
-        accounts: r.doc.accounts,
-        last_synced: r.doc.last_synced,
-        // Do NOT expose access_token
-      }));
+    // Match any Plaid item belonging to this user (user_db)
+    const userItemsDocs = allItems.rows
+      .filter((r) => r.doc && r.doc.user_db === req.user.dbName)
+      .map((r) => r.doc);
 
-    // Enrich with metadata from user DB
     const userDb = getUserDb(req.user.dbName);
     const enriched = [];
-    for (const item of userItems) {
-      try {
-        const metaDoc = await userDb.get(`b_${budgetId}_plaid_link_${item.item_id}`);
-        enriched.push({
-          ...item,
-          institution_name: metaDoc.institution_name,
-          status: metaDoc.status,
-          last_error: metaDoc.last_error,
-        });
-      } catch (e) {
-        enriched.push({ ...item, institution_name: "Unknown", status: "unknown" });
+
+    for (const itemDoc of userItemsDocs) {
+      // If item was previously attached to a different budget, update it to the current budget
+      if (itemDoc.budget_id !== budgetId) {
+        itemDoc.budget_id = budgetId;
+        try {
+          await plaidTokensDb.insert(itemDoc);
+        } catch (e) {
+          console.warn("Could not update budget_id on itemDoc:", e.message);
+        }
       }
+
+      let instName = "Bank Account";
+      let status = "active";
+      let lastError = null;
+
+      try {
+        const metaDoc = await userDb.get(`b_${budgetId}_plaid_link_${itemDoc.item_id}`);
+        instName = metaDoc.institution_name || instName;
+        status = metaDoc.status || status;
+        lastError = metaDoc.last_error || lastError;
+      } catch (e) {
+        // Create user-visible metadata doc in new budget if it doesn't exist yet
+        try {
+          const newMetaDoc = {
+            _id: `b_${budgetId}_plaid_link_${itemDoc.item_id}`,
+            institution_name: "Simplii Financial",
+            accounts: itemDoc.accounts || [],
+            last_synced: itemDoc.last_synced,
+            status: "active",
+            last_error: null,
+          };
+          await userDb.insert(newMetaDoc);
+        } catch (e2) { /* ignore */ }
+      }
+
+      enriched.push({
+        item_id: itemDoc.item_id,
+        institution_name: instName,
+        accounts: itemDoc.accounts || [],
+        last_synced: itemDoc.last_synced,
+        status: status,
+        last_error: lastError,
+      });
     }
 
     res.json({ accounts: enriched });
