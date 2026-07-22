@@ -528,6 +528,7 @@ app.post("/exchange_token", authenticateUser, async (req, res) => {
       _id: `plaid_item_${item_id}`,
       access_token: access_token,
       item_id: item_id,
+      institution_name: institutionName,
       user_db: req.user.dbName,
       budget_id: budgetId,
       accounts: accounts,
@@ -714,7 +715,7 @@ app.get("/accounts", authenticateUser, async (req, res) => {
         }
       }
 
-      let instName = "Bank Account";
+      let instName = itemDoc.institution_name || "Bank Account";
       let status = "active";
       let lastError = null;
 
@@ -728,7 +729,7 @@ app.get("/accounts", authenticateUser, async (req, res) => {
         try {
           const newMetaDoc = {
             _id: `b_${budgetId}_plaid_link_${itemDoc.item_id}`,
-            institution_name: "Simplii Financial",
+            institution_name: instName,
             accounts: itemDoc.accounts || [],
             last_synced: itemDoc.last_synced,
             status: "active",
