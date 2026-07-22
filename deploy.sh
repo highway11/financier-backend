@@ -20,11 +20,11 @@ docker run --rm -v "$PWD":/app -w /app node:18 bash -c "yarn install && yarn bui
 echo "----------------------------------------"
 echo "🐳 4/5: Rebuilding Docker images and restarting containers..."
 cd ~/financier
-docker compose build node
+docker compose build node nginx init plaid_sync
 docker compose up -d
 
 echo "----------------------------------------"
-echo "🌐 5/5: Restarting Nginx to clear IP cache..."
+echo "🌐 5/5: Restarting Nginx to pick up config changes..."
 docker compose restart nginx
 
 echo "----------------------------------------"

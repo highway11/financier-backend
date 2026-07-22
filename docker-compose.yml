@@ -5,10 +5,10 @@ services:
   # nginx serves the static files from Financier Mobile and reverse proxies
   # all the other containers.
   nginx:
-    image: registry.gitlab.com/josh-whitney/financier-backend/nginx
-    #build:
-    #  context: ./docker/nginx
-    #  dockerfile: ./Dockerfile
+    #image: registry.gitlab.com/josh-whitney/financier-backend/nginx
+    build:
+      context: ./docker/nginx
+      dockerfile: ./Dockerfile
     ports:
       - "80:80"
       - "443:443"
@@ -32,10 +32,10 @@ services:
   # This is a common way to do things in Kubernetes for example, see
   # https://blog.idempotent.ca/2017/06/04/kubernetes-learning-notes---part-4---service-bootstrapping-with-init-containers/
   init:
-    image: registry.gitlab.com/josh-whitney/financier-backend/init
-    #build:
-    #  context: ./docker/init
-    #  dockerfile: ./Dockerfile
+    #image: registry.gitlab.com/josh-whitney/financier-backend/init
+    build:
+      context: ./docker/init
+      dockerfile: ./Dockerfile
     depends_on:
       - "couchdb"
     command: sh -c '/wait-for couchdb:5984 -- /couchdb_init.sh'
@@ -64,6 +64,18 @@ services:
     #  context: ./docker/generate_ssl_certs
     #  dockerfile: ./Dockerfile
     command: echo -e "generate_ssl_certs disabled. Run manually only if you need SSL certs generated using\ndocker-compose run generate_ssl_certs sh ./create_certs.sh"
+  # Plaid bank sync service — handles Plaid API interactions and
+  # writes synced transactions into CouchDB.
+  plaid_sync:
+    build:
+      context: ./docker/plaid_sync
+      dockerfile: ./Dockerfile
+    env_file:
+      - .env
+    secrets:
+      - admin_password
+    depends_on:
+      - couchdb
 
 
 secrets:

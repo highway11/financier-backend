@@ -11,6 +11,9 @@ sh -c "$script" -- "$HOST" "_users"
 sh -c "$script" -- "$HOST" "_replicator"
 sh -c "$script" -- "$HOST" "_global_changes"
 
+echo "Creating plaid_tokens database (admin-only, for Plaid access tokens)"
+sh -c "$script" -- "$HOST" "plaid_tokens"
+
 
 if [ -n "$ADMIN_PASSWORD" ]
 then
