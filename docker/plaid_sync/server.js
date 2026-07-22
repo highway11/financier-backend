@@ -118,7 +118,7 @@ function getUserDb(dbName) {
  */
 async function getExistingPayees(userDb, budgetId) {
   const prefix = `b_${budgetId}_payee_`;
-  const result = await userDb.allDocs({
+  const result = await userDb.list({
     include_docs: true,
     startkey: prefix,
     endkey: prefix + "\uffff",
@@ -197,7 +197,7 @@ async function resolvePayee(userDb, budgetId, rawName, existingPayees, importMap
  */
 async function findTransactionByPlaidId(userDb, budgetId, plaidTransactionId) {
   const prefix = `b_${budgetId}_transaction_`;
-  const result = await userDb.allDocs({
+  const result = await userDb.list({
     include_docs: true,
     startkey: prefix,
     endkey: prefix + "\uffff",
@@ -353,13 +353,20 @@ app.get("/status", (req, res) => {
   res.json({ status: "ok", plaid_env: PLAID_ENV });
 });
 
+const crypto = require("crypto");
+
 /**
  * POST /create_link_token — Create a Plaid Link token for the frontend
  */
 app.post("/create_link_token", authenticateUser, async (req, res) => {
   try {
+    const clientUserId = crypto
+      .createHash("sha256")
+      .update(req.user.name)
+      .digest("hex");
+
     const response = await plaidClient.linkTokenCreate({
-      user: { client_user_id: req.user.name },
+      user: { client_user_id: clientUserId },
       client_name: "Financier",
       products: ["transactions"],
       country_codes: PLAID_COUNTRY_CODES,
@@ -539,7 +546,7 @@ app.post("/sync", authenticateUser, async (req, res) => {
 
   try {
     // Find all Plaid items for this user/budget
-    const allItems = await plaidTokensDb.allDocs({ include_docs: true });
+    const allItems = await plaidTokensDb.list({ include_docs: true });
     const userItems = allItems.rows
       .filter((r) => r.doc && r.doc.user_db === req.user.dbName && r.doc.budget_id === budgetId)
       .map((r) => r.doc);
@@ -596,7 +603,7 @@ app.get("/accounts", authenticateUser, async (req, res) => {
   }
 
   try {
-    const allItems = await plaidTokensDb.allDocs({ include_docs: true });
+    const allItems = await plaidTokensDb.list({ include_docs: true });
     const userItems = allItems.rows
       .filter((r) => r.doc && r.doc.user_db === req.user.dbName && r.doc.budget_id === budgetId)
       .map((r) => ({
