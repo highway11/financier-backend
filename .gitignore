@@ -8,3 +8,6 @@ npm-debug.log
 /secrets/*
 /scratch/*
 /couchdb_data/*
+/financier-frontend/
+/timeout.ini
+.env
