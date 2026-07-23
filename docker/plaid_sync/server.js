@@ -433,32 +433,73 @@ async function syncItemTransactions(itemDoc, options = {}) {
         return false;
       });
 
-      let payeeIdFinal = null;
-      let categoryFinal = null;
-      let transferFinal = null;
-
       if (targetAccount) {
-        transferFinal = targetAccount.id;
-      } else {
-        const { payeeId, categorySuggest } = await resolvePayee(
-          userDb, budgetId, rawName, existingPayees, importMappings
-        );
-        payeeIdFinal = payeeId;
-        categoryFinal = categorySuggest || null;
+        const trans1Id = uuidv4();
+        const trans2Id = uuidv4();
+
+        // 1. Primary transaction doc (on source account)
+        const transDoc1 = {
+          _id: `b_${budgetId}_transaction_${trans1Id}`,
+          value: value,
+          date: txn.date,
+          account: financierAccountId,
+          payee: null,
+          memo: txn.name || null,
+          cleared: true,
+          reconciled: false,
+          flag: null,
+          category: null,
+          transfer: trans2Id,
+          splits: [],
+          checkNumber: null,
+          plaid_transaction_id: txn.transaction_id,
+        };
+
+        // 2. Counterpart transaction doc (on destination account)
+        const transDoc2 = {
+          _id: `b_${budgetId}_transaction_${trans2Id}`,
+          value: -value,
+          date: txn.date,
+          account: targetAccount.id,
+          payee: null,
+          memo: txn.name || null,
+          cleared: true,
+          reconciled: false,
+          flag: null,
+          category: null,
+          transfer: trans1Id,
+          splits: [],
+          checkNumber: null,
+        };
+
+        try {
+          await userDb.insert(transDoc1);
+          await userDb.insert(transDoc2);
+          knownPlaidIds.add(txn.transaction_id);
+          totalAdded++;
+        } catch (err) {
+          console.warn(`Failed to insert transfer pair for ${txn.transaction_id}:`, err.message);
+        }
+        continue;
       }
+
+      // Regular non-transfer transaction creation
+      const { payeeId, categorySuggest } = await resolvePayee(
+        userDb, budgetId, rawName, existingPayees, importMappings
+      );
 
       const transDoc = {
         _id: `b_${budgetId}_transaction_${uuidv4()}`,
         value: value,
         date: txn.date, // Already YYYY-MM-DD
         account: financierAccountId,
-        payee: payeeIdFinal,
+        payee: payeeId,
         memo: txn.name || null, // Raw bank description in memo
         cleared: true,
         reconciled: false,
         flag: null,
-        category: categoryFinal,
-        transfer: transferFinal,
+        category: categorySuggest || null,
+        transfer: null,
         splits: [],
         checkNumber: null,
         plaid_transaction_id: txn.transaction_id,
