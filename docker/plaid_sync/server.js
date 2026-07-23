@@ -168,6 +168,19 @@ async function getImportMappings(userDb, budgetId) {
 }
 
 /**
+ * Get transfer matching rules for a user's budget.
+ * Structure: { [accountId]: ["keyword1", "keyword2"] }
+ */
+async function getTransferRules(userDb, budgetId) {
+  try {
+    const doc = await userDb.get(`b_${budgetId}_transfer_rules`);
+    return doc.rules || {};
+  } catch (e) {
+    return {};
+  }
+}
+
+/**
  * Find or create a payee for a Plaid transaction.
  * Uses the same matching logic as the CSV import.
  */
@@ -289,10 +302,11 @@ async function syncItemTransactions(itemDoc, options = {}) {
   const budgetId = itemDoc.budget_id;
   const accessToken = itemDoc.access_token;
 
-  // Load existing payees and mappings for this budget
+  // Load existing payees, mappings, accounts, and transfer rules for this budget
   const existingPayees = await getExistingPayees(userDb, budgetId);
   const importMappings = await getImportMappings(userDb, budgetId);
   const userAccounts = await getUserAccounts(userDb, budgetId);
+  const transferRules = await getTransferRules(userDb, budgetId);
 
   // Build a map of Plaid account_id → Financier account_id
   const accountMap = {};
@@ -389,7 +403,34 @@ async function syncItemTransactions(itemDoc, options = {}) {
 
         const rawLower = (txn.name || "").toLowerCase();
         const cleanLower = rawName.toLowerCase();
-        return rawLower.includes(accNameLower) || cleanLower.includes(accNameLower);
+
+        // 1. Check custom transfer rules from database
+        const customKeywords = transferRules[acc.id] || [];
+        for (const kw of customKeywords) {
+          const kwLower = kw.toLowerCase().trim();
+          if (kwLower && (rawLower.includes(kwLower) || cleanLower.includes(kwLower))) {
+            return true;
+          }
+        }
+
+        // 2. Direct exact name match
+        if (rawLower.includes(accNameLower) || cleanLower.includes(accNameLower)) {
+          return true;
+        }
+
+        // 3. Significant word token matching (e.g. "triangle" matching "CT Triangle Mastercard")
+        const words = accNameLower.split(/[\s\-_]+/).filter(w => w.length >= 4 && w !== "account" && w !== "card" && w !== "personal");
+        for (const word of words) {
+          if (rawLower.includes(word) || cleanLower.includes(word)) {
+            return true;
+          }
+          // Common typo handling: e.g. "tirangle" -> "triangle"
+          if (word === "triangle" && (rawLower.includes("tirangle") || cleanLower.includes("tirangle"))) {
+            return true;
+          }
+        }
+
+        return false;
       });
 
       let payeeIdFinal = null;
