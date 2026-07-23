@@ -341,6 +341,14 @@ async function syncItemTransactions(itemDoc, options = {}) {
     ? moment().subtract(lookbackDays, "days").format("YYYY-MM-DD")
     : null;
 
+  // Attempt to trigger a real-time refresh from the bank's servers
+  try {
+    await plaidClient.transactionsRefresh({ access_token: accessToken });
+    console.log(`Triggered live transactionsRefresh for item ${itemDoc.item_id}`);
+  } catch (refreshErr) {
+    console.warn(`transactionsRefresh notice for ${itemDoc.item_id}:`, refreshErr.response?.data || refreshErr.message);
+  }
+
   let cursor = (options.resetCursor || options.lookbackDays) ? "" : (itemDoc.cursor || "");
   let hasMore = true;
   let totalAdded = 0;
