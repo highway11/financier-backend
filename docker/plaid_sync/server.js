@@ -262,8 +262,9 @@ async function updateExistingTransaction(userDb, docId, plaidTransactionId, rawN
 
 /**
  * Sync transactions for a single Plaid Item.
+ * Options: { lookbackDays: number, resetCursor: boolean }
  */
-async function syncItemTransactions(itemDoc) {
+async function syncItemTransactions(itemDoc, options = {}) {
   const userDb = getUserDb(itemDoc.user_db);
   const budgetId = itemDoc.budget_id;
   const accessToken = itemDoc.access_token;
@@ -299,7 +300,13 @@ async function syncItemTransactions(itemDoc) {
 
   const matchedDocIds = new Set();
 
-  let cursor = itemDoc.cursor || "";
+  // Handle cursor and lookback window
+  const lookbackDays = parseInt(options.lookbackDays, 10);
+  const cutoffDate = (lookbackDays && lookbackDays > 0)
+    ? moment().subtract(lookbackDays, "days").format("YYYY-MM-DD")
+    : null;
+
+  let cursor = (options.resetCursor || options.lookbackDays) ? "" : (itemDoc.cursor || "");
   let hasMore = true;
   let totalAdded = 0;
   let totalModified = 0;
@@ -318,6 +325,9 @@ async function syncItemTransactions(itemDoc) {
     for (const txn of added) {
       // Skip pending transactions — they'll come back as posted later
       if (txn.pending) continue;
+
+      // Skip transactions older than lookback window (if specified)
+      if (cutoffDate && txn.date < cutoffDate) continue;
 
       const financierAccountId = accountMap[txn.account_id];
       if (!financierAccountId) continue; // Account not mapped
@@ -630,17 +640,19 @@ app.post("/update_mappings", authenticateUser, async (req, res) => {
  * Body: { budgetId, itemId? }
  */
 app.post("/sync", authenticateUser, async (req, res) => {
-  const { budgetId, itemId } = req.body;
+  const { budgetId, itemId, lookbackDays, resetCursor } = req.body;
 
   if (!budgetId) {
     return res.status(400).json({ error: "Missing budgetId" });
   }
 
+  const options = { lookbackDays, resetCursor };
+
   try {
     // Find all Plaid items for this user/budget
     const allItems = await plaidTokensDb.list({ include_docs: true });
     const userItems = allItems.rows
-      .filter((r) => r.doc && r.doc.user_db === req.user.dbName && r.doc.budget_id === budgetId)
+      .filter((r) => r.doc && r.doc.user_db === req.user.dbName)
       .map((r) => r.doc);
 
     if (itemId) {
@@ -650,7 +662,7 @@ app.post("/sync", authenticateUser, async (req, res) => {
         return res.status(404).json({ error: "Plaid item not found" });
       }
 
-      const result = await syncItemTransactions(item);
+      const result = await syncItemTransactions(item, options);
       return res.json({ success: true, items: [{ item_id: itemId, ...result }] });
     }
 
@@ -658,7 +670,7 @@ app.post("/sync", authenticateUser, async (req, res) => {
     const results = [];
     for (const item of userItems) {
       try {
-        const result = await syncItemTransactions(item);
+        const result = await syncItemTransactions(item, options);
         results.push({ item_id: item.item_id, ...result });
       } catch (err) {
         console.error(`Sync error for item ${item.item_id}:`, err.message);
