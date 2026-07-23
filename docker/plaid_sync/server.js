@@ -136,6 +136,26 @@ async function getExistingPayees(userDb, budgetId) {
 }
 
 /**
+ * Get all existing accounts from a user's budget.
+ */
+async function getUserAccounts(userDb, budgetId) {
+  const prefix = `b_${budgetId}_account_`;
+  const result = await userDb.list({
+    include_docs: true,
+    startkey: prefix,
+    endkey: prefix + "\uffff",
+  });
+
+  return result.rows
+    .filter((r) => r.doc && !r.doc._deleted)
+    .map((r) => ({
+      id: r.doc._id.slice(r.doc._id.lastIndexOf("_") + 1),
+      name: r.doc.name,
+      _id: r.doc._id,
+    }));
+}
+
+/**
  * Get all existing import mappings from a user's budget.
  */
 async function getImportMappings(userDb, budgetId) {
@@ -272,6 +292,7 @@ async function syncItemTransactions(itemDoc, options = {}) {
   // Load existing payees and mappings for this budget
   const existingPayees = await getExistingPayees(userDb, budgetId);
   const importMappings = await getImportMappings(userDb, budgetId);
+  const userAccounts = await getUserAccounts(userDb, budgetId);
 
   // Build a map of Plaid account_id → Financier account_id
   const accountMap = {};
@@ -359,22 +380,44 @@ async function syncItemTransactions(itemDoc, options = {}) {
 
       // 3. Insert new transaction doc if no match
       const rawName = getPlaidPayeeName(txn);
-      const { payeeId, categorySuggest } = await resolvePayee(
-        userDb, budgetId, rawName, existingPayees, importMappings
-      );
+
+      // Check if this transaction represents a transfer to another account in the budget
+      const targetAccount = userAccounts.find((acc) => {
+        if (acc.id === financierAccountId) return false;
+        const accNameLower = acc.name.toLowerCase().trim();
+        if (!accNameLower) return false;
+
+        const rawLower = (txn.name || "").toLowerCase();
+        const cleanLower = rawName.toLowerCase();
+        return rawLower.includes(accNameLower) || cleanLower.includes(accNameLower);
+      });
+
+      let payeeIdFinal = null;
+      let categoryFinal = null;
+      let transferFinal = null;
+
+      if (targetAccount) {
+        transferFinal = targetAccount.id;
+      } else {
+        const { payeeId, categorySuggest } = await resolvePayee(
+          userDb, budgetId, rawName, existingPayees, importMappings
+        );
+        payeeIdFinal = payeeId;
+        categoryFinal = categorySuggest || null;
+      }
 
       const transDoc = {
         _id: `b_${budgetId}_transaction_${uuidv4()}`,
         value: value,
         date: txn.date, // Already YYYY-MM-DD
         account: financierAccountId,
-        payee: payeeId,
+        payee: payeeIdFinal,
         memo: txn.name || null, // Raw bank description in memo
         cleared: true,
         reconciled: false,
         flag: null,
-        category: categorySuggest || null,
-        transfer: null,
+        category: categoryFinal,
+        transfer: transferFinal,
         splits: [],
         checkNumber: null,
         plaid_transaction_id: txn.transaction_id,
