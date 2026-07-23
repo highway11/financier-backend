@@ -356,11 +356,36 @@ async function syncItemTransactions(itemDoc, options = {}) {
   let totalRemoved = 0;
 
   while (hasMore) {
-    const syncResponse = await plaidClient.transactionsSync({
-      access_token: accessToken,
-      cursor: cursor,
-      count: 500,
-    });
+    let syncResponse;
+    try {
+      syncResponse = await plaidClient.transactionsSync({
+        access_token: accessToken,
+        cursor: cursor,
+        count: 500,
+      });
+    } catch (err) {
+      const plaidErr = err.response?.data;
+      console.error(`transactionsSync failed for item ${itemDoc.item_id}:`, plaidErr || err.message);
+
+      let statusMsg = "error";
+      let errMsg = err.message;
+
+      if (plaidErr && plaidErr.error_code === "ITEM_LOGIN_REQUIRED") {
+        statusMsg = "login_required";
+        errMsg = "Bank authentication required. Please re-authenticate your login.";
+      }
+
+      // Update metaDoc status
+      try {
+        const metaDocId = `b_${budgetId}_plaid_link_${itemDoc.item_id}`;
+        const metaDoc = await userDb.get(metaDocId);
+        metaDoc.status = statusMsg;
+        metaDoc.last_error = errMsg;
+        await userDb.insert(metaDoc);
+      } catch (e) { /* ignore */ }
+
+      throw new Error(errMsg);
+    }
 
     const { added, modified, removed, next_cursor, has_more } = syncResponse.data;
 
@@ -599,15 +624,26 @@ app.post("/create_link_token", authenticateUser, async (req, res) => {
       .update(req.user.name)
       .digest("hex");
 
-    const response = await plaidClient.linkTokenCreate({
+    const linkConfig = {
       user: { client_user_id: clientUserId },
       client_name: "Financier",
-      products: ["transactions"],
       country_codes: PLAID_COUNTRY_CODES,
       language: "en",
-      webhook: PLAID_WEBHOOK_URL || undefined,
-    });
+    };
 
+    if (req.body.itemId) {
+      try {
+        const tokenDoc = await plaidTokensDb.get(`plaid_item_${req.body.itemId}`);
+        linkConfig.access_token = tokenDoc.access_token;
+      } catch (e) {
+        console.warn("Could not find item for update mode:", req.body.itemId);
+      }
+    } else {
+      linkConfig.products = ["transactions"];
+      linkConfig.webhook = PLAID_WEBHOOK_URL || undefined;
+    }
+
+    const response = await plaidClient.linkTokenCreate(linkConfig);
     res.json({ link_token: response.data.link_token });
   } catch (err) {
     console.error("create_link_token error:", err.response?.data || err.message);
